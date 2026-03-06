@@ -38,7 +38,7 @@ def _init_hardened_auth():
 def _redact_config(obj):
     """Recursively redact sensitive keys in config dicts."""
     import re
-    pat = re.compile(r'(token|key|secret|password|credential|api_key|apiKey|bot_token)', re.IGNORECASE)
+    pat = re.compile(r'(token|api[_-]?key|secret[_-]?key|private[_-]?key|fleet[_-]?key|secret|password|credential|bot[_-]?token|apiKey|secretKey|privateKey|fleetKey)', re.IGNORECASE)
     if isinstance(obj, dict):
         return {k: ('[REDACTED]' if pat.search(k) and isinstance(v, str) else _redact_config(v)) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -2811,8 +2811,9 @@ function clawmetryLogout(){
 
 <!-- CRONS -->
 <div class="page" id="page-crons">
-  <div class="refresh-bar">
+  <div class="refresh-bar" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
     <button class="refresh-btn" onclick="loadCrons()">&#x21bb; Refresh</button>
+    <span id="cron-agent-filter"></span>
     <!-- New Cron Job button disabled until gateway CRUD is properly tested -->
   </div>
   <div class="card" id="crons-list">Loading...</div>
@@ -7021,8 +7022,9 @@ function clawmetryLogout(){
 
 <!-- CRONS -->
 <div class="page" id="page-crons">
-  <div class="refresh-bar">
+  <div class="refresh-bar" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
     <button class="refresh-btn" onclick="loadCrons()">&#x21bb; Refresh</button>
+    <span id="cron-agent-filter"></span>
     <!-- New Cron Job button disabled until gateway CRUD is properly tested -->
   </div>
   <div class="card" id="crons-list">Loading...</div>
@@ -9063,16 +9065,37 @@ async function loadSessions() {
 
 var _cronJobs = [];
 var _cronExpanded = {};
+var _cronAgentFilter = 'all';
 
 async function loadCrons() {
   var data = await fetch('/api/crons').then(r => r.json());
   _cronJobs = data.jobs || [];
+  renderCronAgentFilter();
   renderCrons();
+}
+
+function renderCronAgentFilter() {
+  var container = document.getElementById('cron-agent-filter');
+  if (!container) return;
+  var counts = {};
+  _cronJobs.forEach(function(j) {
+    var agent = j.agentId || 'unknown';
+    counts[agent] = (counts[agent] || 0) + 1;
+  });
+  var agents = Object.keys(counts).sort();
+  var html = '<select id="cron-agent-select" onchange="_cronAgentFilter=this.value;renderCrons();" style="background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border-primary);border-radius:6px;padding:6px 12px;font-size:13px;cursor:pointer;outline:none;">';
+  html += '<option value="all">All Agents (' + _cronJobs.length + ')</option>';
+  agents.forEach(function(a) {
+    html += '<option value="' + a + '"' + (_cronAgentFilter === a ? ' selected' : '') + '>' + a + ' (' + counts[a] + ')</option>';
+  });
+  html += '</select>';
+  container.innerHTML = html;
 }
 
 function renderCrons() {
   var html = '';
-  _cronJobs.forEach(function(j) {
+  var filtered = _cronAgentFilter === 'all' ? _cronJobs : _cronJobs.filter(function(j) { return (j.agentId || 'unknown') === _cronAgentFilter; });
+  filtered.forEach(function(j) {
     var status = j.state && j.state.lastStatus ? j.state.lastStatus : 'pending';
     var isEnabled = j.enabled !== false;
     var disabledClass = isEnabled ? '' : ' cron-disabled';
