@@ -2414,6 +2414,10 @@ DASHBOARD_HTML = r"""
 </div>
 <script>
 (function(){
+  // HARDENED: Pick up ?token= from URL and persist to localStorage
+  var _up = new URLSearchParams(window.location.search);
+  var _ut = _up.get("token");
+  if(_ut){ localStorage.setItem("clawmetry-token",_ut); _up.delete("token"); window.history.replaceState({},"",window.location.pathname+(_up.toString()?"?"+_up.toString():"")); }
   var stored = localStorage.getItem('clawmetry-token');
   fetch('/api/auth/check' + (stored ? '?token=' + encodeURIComponent(stored) : ''))
     .then(function(r){return r.json()})
@@ -6620,6 +6624,10 @@ DASHBOARD_HTML = r"""
 </div>
 <script>
 (function(){
+  // HARDENED: Pick up ?token= from URL and persist to localStorage
+  var _up2 = new URLSearchParams(window.location.search);
+  var _ut2 = _up2.get("token");
+  if(_ut2){ localStorage.setItem("clawmetry-token",_ut2); _up2.delete("token"); window.history.replaceState({},"",window.location.pathname+(_up2.toString()?"?"+_up2.toString():"")); }
   var stored = localStorage.getItem('clawmetry-token');
   fetch('/api/auth/check' + (stored ? '?token=' + encodeURIComponent(stored) : ''))
     .then(function(r){return r.json()})
@@ -12815,6 +12823,10 @@ function finishBootOverlay() {
 async function bootDashboard() {
   // Check auth first -- if not valid, show login and abort boot
   try {
+    // HARDENED: Pick up ?token= from URL and persist to localStorage
+    var _up4 = new URLSearchParams(window.location.search);
+    var _ut4 = _up4.get("token");
+    if(_ut4){ localStorage.setItem("clawmetry-token",_ut4); _up4.delete("token"); window.history.replaceState({},"",window.location.pathname+(_up4.toString()?"?"+_up4.toString():"")); }
     var stored = localStorage.getItem('clawmetry-token');
     var authRes = await fetch('/api/auth/check' + (stored ? '?token=' + encodeURIComponent(stored) : ''));
     var authData = await authRes.json();
@@ -13688,6 +13700,16 @@ def _auto_discover_gateway(token):
 @bp_auth.route('/api/auth/check')
 def api_auth_check():
     """Check if auth is required and validate token."""
+    # HARDENED: accept hardened token for auth check
+    if HARDENED_MODE and hasattr(app, '_hardened_token') and app._hardened_token:
+        token = request.headers.get('Authorization', '').replace('Bearer ', '').strip()
+        if not token:
+            token = request.args.get('token', '').strip()
+        if not token:
+            token = request.cookies.get('clawmetry_token', '').strip()
+        if token == app._hardened_token:
+            return jsonify({'authRequired': True, 'valid': True})
+        return jsonify({'authRequired': True, 'valid': False})
     if not GATEWAY_TOKEN:
         return jsonify({'authRequired': True, 'valid': False, 'needsSetup': True})
     token = request.headers.get('Authorization', '').replace('Bearer ', '').strip()
@@ -13715,11 +13737,20 @@ def _check_auth():
     if HARDENED_MODE and hasattr(app, '_hardened_token') and app._hardened_token:
         # Allow root and /auth without token (login page)
         if request.path in ('/', '/auth') or request.path.startswith('/static'):
+            # If token provided via URL, set a session cookie so JS fetches work
+            url_token = request.args.get('token', '').strip()
+            if url_token == app._hardened_token:
+                resp = make_response()
+                resp.headers['X-Clawmetry-Auth'] = 'valid'
+                # Cookie will be set after_request (see below)
+                request._set_hardened_cookie = True
             pass
         else:
             token = request.headers.get('Authorization', '').replace('Bearer ', '').strip()
             if not token:
                 token = request.args.get('token', '').strip()
+            if not token:
+                token = request.cookies.get('clawmetry_token', '').strip()
             if token != app._hardened_token:
                 return jsonify({'error': 'Unauthorized — provide ?token=VALUE or Authorization: Bearer VALUE', 'authRequired': True}), 401
         return  # skip legacy auth in hardened mode
@@ -13742,6 +13773,13 @@ def _check_auth():
         return
     return jsonify({'error': 'Unauthorized', 'authRequired': True}), 401
 
+
+@app.after_request
+def _set_auth_cookie(response):
+    """HARDENED: Set auth cookie when token is provided via URL."""
+    if HARDENED_MODE and hasattr(request, '_set_hardened_cookie') and request._set_hardened_cookie:
+        response.set_cookie('clawmetry_token', app._hardened_token, httponly=True, samesite='Strict', max_age=86400*30)
+    return response
 
 @app.after_request
 def _redact_response(response):
