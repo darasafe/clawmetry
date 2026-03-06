@@ -18,6 +18,33 @@ MIT License
 import os
 import sys
 
+# ── HARDENED MODE ────────────────────────────────────────────────────────────
+HARDENED_MODE = True
+_SENSITIVE_KEYS_RE = None  # set after re import
+
+def _init_hardened_auth():
+    """Generate or load dashboard auth token."""
+    import secrets
+    token_path = os.path.expanduser('~/.clawmetry-auth-token')
+    if os.path.exists(token_path):
+        with open(token_path) as f:
+            return f.read().strip()
+    token = secrets.token_urlsafe(32)
+    with open(token_path, 'w') as f:
+        f.write(token)
+    os.chmod(token_path, 0o600)
+    return token
+
+def _redact_config(obj):
+    """Recursively redact sensitive keys in config dicts."""
+    import re
+    pat = re.compile(r'(token|key|secret|password|credential|api_key|apiKey|bot_token)', re.IGNORECASE)
+    if isinstance(obj, dict):
+        return {k: ('[REDACTED]' if pat.search(k) and isinstance(v, str) else _redact_config(v)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redact_config(i) for i in obj]
+    return obj
+
 # Force UTF-8 output on Windows (emoji in BANNER would crash with cp1252)
 if sys.platform == 'win32':
     import io
@@ -1383,14 +1410,7 @@ def _detect_gateway_token():
         for pid in result.stdout.strip().split('\n'):
             pid = pid.strip()
             if pid:
-                try:
-                    with open(f'/proc/{pid}/environ', 'r') as f:
-                        env_data = f.read()
-                    for entry in env_data.split('\0'):
-                        if entry.startswith('OPENCLAW_GATEWAY_TOKEN='):
-                            return entry.split('=', 1)[1]
-                except (PermissionError, FileNotFoundError):
-                    pass
+                pass  # HARDENED: /proc environ reading disabled
     except Exception:
         pass
     # 3. Config files
@@ -1437,7 +1457,7 @@ def get_public_ip():
     """Get the machine's public IP address (useful for cloud/VPS users)."""
     try:
         import urllib.request
-        return urllib.request.urlopen("https://api.ipify.org", timeout=2).read().decode().strip()
+        return "disabled"  # HARDENED: phone-home disabled
     except Exception:
         return None
 
@@ -5596,14 +5616,7 @@ def _detect_gateway_token():
         for pid in result.stdout.strip().split('\n'):
             pid = pid.strip()
             if pid:
-                try:
-                    with open(f'/proc/{pid}/environ', 'r') as f:
-                        env_data = f.read()
-                    for entry in env_data.split('\0'):
-                        if entry.startswith('OPENCLAW_GATEWAY_TOKEN='):
-                            return entry.split('=', 1)[1]
-                except (PermissionError, FileNotFoundError):
-                    pass
+                pass  # HARDENED: /proc environ reading disabled
     except Exception:
         pass
     # 3. Config files
@@ -5650,7 +5663,7 @@ def get_public_ip():
     """Get the machine's public IP address (useful for cloud/VPS users)."""
     try:
         import urllib.request
-        return urllib.request.urlopen("https://api.ipify.org", timeout=2).read().decode().strip()
+        return "disabled"  # HARDENED: phone-home disabled
     except Exception:
         return None
 
@@ -13689,7 +13702,29 @@ def api_auth_check():
 
 @app.before_request
 def _check_auth():
-    """Require valid gateway token for all /api/* routes when GATEWAY_TOKEN is set."""
+    """HARDENED: Block write endpoints, require dashboard token, redact sensitive data."""
+    # --- HARDENED: Block all write endpoints except OTEL ingest ---
+    if HARDENED_MODE and request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
+        # Allow OTEL ingest endpoints
+        if request.path in ('/v1/metrics', '/v1/traces'):
+            pass  # allowed
+        else:
+            return jsonify({'error': 'Write endpoints disabled in hardened mode'}), 403
+
+    # --- HARDENED: Dashboard token auth ---
+    if HARDENED_MODE and hasattr(app, '_hardened_token') and app._hardened_token:
+        # Allow root and /auth without token (login page)
+        if request.path in ('/', '/auth') or request.path.startswith('/static'):
+            pass
+        else:
+            token = request.headers.get('Authorization', '').replace('Bearer ', '').strip()
+            if not token:
+                token = request.args.get('token', '').strip()
+            if token != app._hardened_token:
+                return jsonify({'error': 'Unauthorized — provide ?token=VALUE or Authorization: Bearer VALUE', 'authRequired': True}), 401
+        return  # skip legacy auth in hardened mode
+
+    # --- Legacy auth (non-hardened) ---
     if request.path == '/api/auth/check':
         return  # Auth check endpoint is always accessible
     if request.path == '/api/gw/config':
@@ -13706,6 +13741,20 @@ def _check_auth():
     if token == GATEWAY_TOKEN:
         return
     return jsonify({'error': 'Unauthorized', 'authRequired': True}), 401
+
+
+@app.after_request
+def _redact_response(response):
+    """HARDENED: Redact sensitive keys from all JSON API responses."""
+    if HARDENED_MODE and response.content_type and 'application/json' in response.content_type:
+        try:
+            data = response.get_json(silent=True)
+            if data is not None:
+                redacted = _redact_config(data)
+                response.set_data(json.dumps(redacted))
+        except Exception:
+            pass
+    return response
 
 
 @bp_auth.route('/auth')
@@ -20063,7 +20112,10 @@ def _run_server(args):
         print(f"  History:    Disabled (history.py not found)")
     print()
 
-    warnings, tips = validate_configuration()
+    try:
+        warnings, tips = validate_configuration()
+    except Exception:
+        warnings, tips = [], []
     if warnings or tips:
         print("[check] Configuration Check:")
         for warning in warnings:
@@ -20087,6 +20139,16 @@ def _run_server(args):
     print()
     if not args.debug:
         print(f"  Tip: run as background service with: clawmetry start")
+        print()
+
+    # HARDENED: Force localhost binding — prevents exposure on network interfaces.
+    # Even if --host is passed, hardened mode overrides to 127.0.0.1 for safety.
+    if HARDENED_MODE:
+        args.host = '127.0.0.1'
+        app._hardened_token = _init_hardened_auth()
+        print()
+        print("  🔒 ClawMetry HARDENED MODE — write endpoints disabled, sensitive data redacted")
+        print(f"  🔑 Dashboard token: {app._hardened_token} (saved to ~/.clawmetry-auth-token)")
         print()
 
     if args.debug:
